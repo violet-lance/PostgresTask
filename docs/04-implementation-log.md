@@ -425,3 +425,55 @@ Reviewed after the stage commit → [reviews/stage-6-review.md](reviews/stage-6-
 - **Deadlock** between a multi-statement transaction and the confirm path. Fixed: the confirm function takes that lock first, with `lock_timeout = 2s`.
 
 Added `ops.refresh_totals()` for safe manual refreshes. Refresh cost measured: 45 ms at 100k, ~56 ms at 300k confirmed rows (parallel aggregate). Fresh re-init: full suite 60/60 PASS.
+
+---
+
+## Stage 7 — Logical replication (requirement 7)
+
+Date: 2026-11-18 · Commit: `feat: logical replication of T1 to pg-replica (stage 7, req 7)`
+
+### What was done
+
+| File | Content |
+|------|---------|
+| `sql/primary/09_publication.sql` | Role `replicator` (`LOGIN REPLICATION`, password from `.env` via psql variable + `\gexec`, `USAGE` on `ops`, `SELECT` on T1 only); `PUBLICATION ops_pub FOR TABLE ops.operations WITH (publish_via_partition_root = true)` |
+| `sql/replica/04_subscription.sql` | `SUBSCRIPTION ops_sub` to `pg-primary` (initial copy, slot `ops_sub`), created only if missing |
+| `verify/07_replication_publisher.sql`, `verify/07_replication_subscriber.sql`, `verify/07_replication.sh` | 5 publisher checks, 7 subscriber checks, data fingerprint comparison, 2 live-propagation checks |
+
+Notes:
+- psql variables are not substituted inside `$$` bodies, so the role and the subscription are created with `SELECT format(…) \gexec`. No secret appears in the SQL files.
+- Only T1 is published. The GUID registry, MV and audit logs stay on the primary (D-14).
+- The replica already has the same partitions (common/02) **before** subscribing (R-03). The initial copy (100k rows) took **< 1 s** and landed in the replica's own monthly partitions, with `DEFAULT` empty.
+- `pg_hba.conf` unchanged (R-07 confirmed in practice).
+
+### Verification
+
+`bash verify/07_replication.sh` — **14/14 PASS**:
+
+```
+publisher:  wal_level=logical | publication: only ops.operations, viaroot, ins/upd/del/trunc
+            replicator: login+replication, not superuser, SELECT on T1 only, no access to the registry
+            slot ops_sub (pgoutput) active | walsender streaming, replay lag 232 bytes
+subscriber: subscription enabled | apply worker running, last message 0.7 s ago | initial sync ready
+            no apply/sync errors | data identical for all rows older than 30 s (count|sum|confirmed|md5 of every row)
+            rows in the replica's own monthly partitions, DEFAULT empty | shape: no registry, no MV, only partition-maintenance job
+live:       new operation appears on the replica after ~0.5 s; its 0 -> 1 confirmation after ~3.4 s (= next confirm run)
+```
+
+The fingerprint compares rows older than a cutoff (`now() − 30 s` on the primary), whose statuses have settled (confirmation takes ≤ ~6 s). It is computed by **one query text** on both instances: `count | sum(amount) | count(status=1) | md5` over every row's `id, status, amount, guid, op_date, message`.
+
+**Negative runs:** subscription disabled → publisher #4/#5, subscriber #1/#2 and both live checks FAIL. After re-enabling, the replica caught up → 14/14 PASS. One amount changed on the replica → fingerprint FAIL; reverted → 14/14 PASS.
+
+Full suite after this stage: primary `01`–`06` 60/60, replica `01_table` 10/10, replication 14/14.
+
+### Carried item closed: S1-09 — self-healing partition maintenance under live replication
+
+| Step | Primary | Replica |
+|------|---------|---------|
+| Row inserted for 2027-06 (no partition) | `operations_default` | `operations_default` |
+| `ensure_monthly_partitions()` on the **primary** (detach DEFAULT → move → attach) | `operations_y2027m06` | still `operations_default`, **0 apply errors**: nothing was published |
+| `ensure_monthly_partitions()` on the **replica** | — | `operations_y2027m06` |
+| `UPDATE amount` on the primary | 43.00 | 43.00: applied to the moved row |
+| `DELETE` on the primary | gone | gone |
+
+**Counterfactual, demonstrated:** the naive move I rejected in Stage 1 (`DELETE` from the attached DEFAULT + `INSERT` into a standalone table + `ATTACH`) was run on a test row. Result: **primary 1 row, replica 0 rows**, a silent desync. The `DELETE` was published, the `INSERT` was not. A later `DELETE` of that row on the primary raised no apply error on the replica, because logical replication skips a missing row on delete. That is exactly why this kind of desync is silent. Test data and partitions were cleaned up on both sides.

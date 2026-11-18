@@ -19,6 +19,8 @@ Context: PostgreSQL requires every `UNIQUE`/`PRIMARY KEY` constraint on a partit
 
 **Reasoning:** uniqueness should be guaranteed by a constraint, not by convention or procedural checks. The registry is the standard workaround for global uniqueness on partitioned tables and does not restrict what GUIDs look like. T1 additionally keeps `UNIQUE (operation_guid, op_date)` as a local index for fast lookups by GUID.
 
+> **Amended in the plan review ([R-02](03-plan-review.md)):** the FK was changed to a composite `(operation_guid, op_date)` referencing `UNIQUE (operation_guid, op_date)` in the registry. With that, uniqueness holds even if the trigger is disabled; the trigger only fills the registry.
+
 **Implementation notes:**
 - The trigger inserts into the registry; a duplicate raises `unique_violation` and aborts the T1 insert.
 - The registry is **not** replicated — on the subscriber, uniqueness is inherited from the publisher (the subscriber only applies already-validated changes).

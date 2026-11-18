@@ -48,5 +48,6 @@
 
 1. **Grilling sessions** — rounds of questions on key design decisions. Every decision is recorded with options, the choice, and the reasoning (`docs/01-grilling-session-*.md`).
 2. **Plan** — consolidated implementation plan derived from the decisions (`docs/02-plan.md`).
-3. **Implementation** — SQL scripts + environment, with an execution & verification log (`docs/03-implementation-log.md`).
-4. **Decision log** — one-line index of all decisions (`docs/decisions.md`).
+3. **Plan review** — traceability check, feasibility spike on a throwaway PostgreSQL 17 container, findings and amendments (`docs/03-plan-review.md`, `docs/spikes/`).
+4. **Implementation** — SQL scripts + environment, with an execution & verification log (`docs/04-implementation-log.md`).
+5. **Decision log** — one-line index of all decisions (`docs/decisions.md`).

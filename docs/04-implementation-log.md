@@ -170,3 +170,7 @@ Manual tests:
 `session_replication_role = replica` disables **all** triggers, including the internal ones that enforce foreign keys. In that mode neither the registry trigger nor the composite FK fires, and a duplicate GUID gets in. The plan review (R-02) wrongly listed this role among the cases the composite FK protects against. It has been corrected there with a note.
 
 Why this is acceptable: setting the role requires superuser, and a superuser can bypass any constraint anyway. The only mechanism that survives the `replica` role is a unique **index**, and PostgreSQL can't build a global unique index across partitions. That is the root cause of the whole requirement. On the subscriber, the apply worker does run in the `replica` role, but it only applies changes that were already validated on the publisher.
+
+### Stage 2 review
+
+Reviewed after the stage commit → [reviews/stage-2-review.md](reviews/stage-2-review.md). **Major fix:** idempotent retries (`INSERT … ON CONFLICT DO NOTHING` with an existing `(guid, op_date)`) failed on the registry because a BEFORE trigger fires before the table's conflict check. The trigger now distinguishes "same GUID, other date" (raises 23505) from "same GUID, same date" (left to T1's unique constraint). Concurrency re-tested for commit / rollback / `DO NOTHING` outcomes. Re-verified: 12/12 PASS (req 3), 10/10 PASS (req 1). Carried to Stage 3: measure insert cost (UUIDv4 vs v7).

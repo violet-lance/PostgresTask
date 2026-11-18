@@ -31,15 +31,30 @@ CREATE TABLE IF NOT EXISTS ops.operation_guid_registry (
 
 COMMENT ON TABLE ops.operation_guid_registry IS
     'Every operation_guid ever issued for ops.operations (requirement 3). The PK makes GUIDs globally unique across partitions. '
-    'Rows are not removed when T1 rows are deleted, so a GUID can never be reused; retention must prune it explicitly '
+    'Rows are not removed when T1 rows are deleted: the GUID stays bound to its op_date and cannot be reused for another '
+    'operation date (re-inserting the identical (guid, op_date) is allowed). Retention must prune it explicitly '
     '(after the referencing partition is dropped). Not replicated.';
 
 
 -- BEFORE INSERT row trigger: registers the GUID in the same transaction.
+--
+-- Three cases (stage-2 review S2-01):
+--   * new GUID                         -> registered, insert proceeds;
+--   * GUID registered with ANOTHER date -> unique_violation raised here (a duplicate in
+--                                         another partition, the case requirement 3 is about);
+--   * GUID registered with the SAME date -> nothing to do here; T1's own
+--                                         UNIQUE (operation_guid, op_date) decides: it raises
+--                                         unique_violation, or skips the row silently under
+--                                         INSERT ... ON CONFLICT DO NOTHING (idempotent retries).
+--   Without this distinction a BEFORE trigger fires *before* T1's conflict check and an
+--   idempotent retry would fail on the registry instead of being skipped.
+--
 -- * No EXCEPTION block on purpose: it would open a subtransaction per row, and a
 --   10k-row generator batch would create 10k subtransactions (subxid cache overflow,
---   pg_subtrans lookups). The native error is already explicit:
---   duplicate key value violates unique constraint "operation_guid_registry_pk".
+--   pg_subtrans lookups). ON CONFLICT DO NOTHING + a lookup needs no subtransaction.
+-- * Concurrency: a concurrent insert of the same GUID waits on the registry PK
+--   (speculative insertion) until the other transaction ends; the follow-up SELECT
+--   is a new statement and sees the committed row (READ COMMITTED).
 -- * Defined on the partitioned parent -> cloned to every partition, including ones
 --   created later or attached by the self-healing maintenance.
 CREATE OR REPLACE FUNCTION ops.register_operation_guid()
@@ -47,9 +62,28 @@ RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = ops, pg_catalog
 AS $$
+DECLARE
+    v_registered_date timestamptz;
 BEGIN
     INSERT INTO ops.operation_guid_registry (operation_guid, op_date)
-    VALUES (NEW.operation_guid, NEW.op_date);
+    VALUES (NEW.operation_guid, NEW.op_date)
+    ON CONFLICT (operation_guid) DO NOTHING;
+
+    IF NOT FOUND THEN
+        SELECT r.op_date INTO v_registered_date
+        FROM ops.operation_guid_registry r
+        WHERE r.operation_guid = NEW.operation_guid;
+
+        IF v_registered_date IS DISTINCT FROM NEW.op_date THEN
+            RAISE EXCEPTION 'operation_guid % is already used by an operation dated %',
+                            NEW.operation_guid, v_registered_date
+                USING ERRCODE    = 'unique_violation',
+                      SCHEMA     = 'ops',
+                      TABLE      = 'operation_guid_registry',
+                      CONSTRAINT = 'operation_guid_registry_pk';
+        END IF;
+    END IF;
+
     RETURN NEW;
 END;
 $$;

@@ -71,6 +71,29 @@ BEGIN
     INSERT INTO vr (check_name, passed, details)
     VALUES ('Same guid with the SAME op_date is rejected', v_err IS NOT NULL, coalesce(v_err, 'accepted!'));
 
+    -- 5a. Idempotent retry: same (guid, op_date) with ON CONFLICT DO NOTHING is silently skipped (S2-01)
+    v_err := NULL;
+    BEGIN
+        INSERT INTO ops.operations (op_date, amount, operation_guid, message) VALUES (d_this, 1, g, msg)
+        ON CONFLICT (operation_guid, op_date) DO NOTHING;
+        v_ok := NOT FOUND;
+    EXCEPTION WHEN unique_violation THEN v_err := SQLERRM; v_ok := false;
+    END;
+    INSERT INTO vr (check_name, passed, details)
+    VALUES ('Idempotent retry (same guid+op_date, ON CONFLICT DO NOTHING) is skipped, no error',
+            v_ok, coalesce(v_err, '0 rows inserted'));
+
+    -- 5b. ON CONFLICT DO NOTHING does NOT hide a duplicate in another partition
+    v_err := NULL;
+    BEGIN
+        INSERT INTO ops.operations (op_date, amount, operation_guid, message) VALUES (d_prev, 1, g, msg)
+        ON CONFLICT (operation_guid, op_date) DO NOTHING;
+    EXCEPTION WHEN unique_violation THEN v_err := SQLERRM;
+    END;
+    INSERT INTO vr (check_name, passed, details)
+    VALUES ('ON CONFLICT DO NOTHING does not swallow a duplicate guid in another partition',
+            v_err IS NOT NULL, coalesce(v_err, 'silently skipped!'));
+
     -- 6. Registry trigger disabled -> still rejected, by the composite FK (R-02)
     v_err := NULL;
     ALTER TABLE ops.operations DISABLE TRIGGER operations_register_guid_trg;

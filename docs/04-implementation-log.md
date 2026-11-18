@@ -118,3 +118,55 @@ Extra manual checks:
 ### Stage 1 review
 
 Reviewed after the stage commit → [reviews/stage-1-review.md](reviews/stage-1-review.md). 5 minor fixes (advisory lock in `create_month_partition`, UTC-only month arithmetic, explicit column list in the self-healing move, "DEFAULT is empty" check, plan docs drift), 3 accepted trade-offs, 1 item carried to Stage 7 (replication safety of self-healing). Re-verified: 10/10 PASS on both instances.
+
+---
+
+## Stage 2 — GUID uniqueness (requirement 3)
+
+Date: 2026-11-18 · Commit: `feat: global operation_guid uniqueness via registry + composite FK (stage 2, req 3)`
+
+### What was done
+
+| File | Content |
+|------|---------|
+| `sql/primary/03_guid_registry.sql` | `ops.operation_guid_registry` (`PK (operation_guid)`, `UNIQUE (operation_guid, op_date)`); `BEFORE INSERT` row trigger `operations_register_guid_trg` → `ops.register_operation_guid()`; composite FK `operations_guid_registry_fk (operation_guid, op_date)` |
+| `verify/03_guid_uniqueness.sql` | 10 checks, rolled back |
+
+### Implementation decisions
+
+- **No `EXCEPTION` block in the trigger function.** In PL/pgSQL each `BEGIN … EXCEPTION` block is a subtransaction; per-row in a 10k-row generator batch, that means 10k subtransactions per transaction (subxid cache overflow → `pg_subtrans` lookups, a known performance cliff). The native error is already precise: `duplicate key value violates unique constraint "operation_guid_registry_pk"`.
+- **Registry rows are not deleted with T1 rows.** The registry means "every GUID ever issued", so a GUID can't be reused after its operation is deleted. Retention must prune the registry explicitly after dropping a partition (the FK enforces that order).
+- **Side effect of the composite FK, kept on purpose:** `operation_guid` / `op_date` of an existing operation are effectively immutable (the new pair isn't in the registry). Status updates don't touch FK columns, so PostgreSQL skips the FK check for them, at no cost to the confirm job.
+
+### Verification
+
+`verify/03_guid_uniqueness.sql` on pg-primary — **10/10 PASS**:
+
+```
+ 1 | PASS | Existing data: no duplicate operation_guid across all partitions
+ 2 | PASS | Existing data: every T1 row has a matching registry row
+ 3 | PASS | Registry has PRIMARY KEY (operation_guid)
+ 4 | PASS | T1 has composite FK (operation_guid, op_date) -> registry
+ 5 | PASS | Insert registers (guid, op_date) in the registry
+ 6 | PASS | Same guid in ANOTHER partition is rejected        | duplicate key value violates unique constraint "operation_guid_registry_pk"
+ 7 | PASS | Same guid with the SAME op_date is rejected       | duplicate key value violates unique constraint "operation_guid_registry_pk"
+ 8 | PASS | Trigger DISABLED: duplicate guid still rejected by composite FK | ... violates foreign key constraint "operations_guid_registry_fk"
+ 9 | PASS | operation_guid of an existing operation cannot be changed       | ... violates foreign key constraint "operations_guid_registry_fk"
+10 | PASS | Status update (FK columns untouched) works
+```
+
+Regression: `verify/01_table.sql` still 10/10 on both instances.
+
+Manual tests:
+
+| Test | Result |
+|------|--------|
+| **Concurrency:** session A inserts GUID `g` and holds the transaction open for 3 s; session B inserts `g` into another partition 1 s later | B **blocked** on the registry PK index until A committed (18:51:30.56 → 18:51:32.48), then failed with `duplicate key … operation_guid_registry_pk`. One row in T1. Race-free. |
+| Self-healed partition (Stage 1 path) on the primary | Gets the cloned `operations_register_guid_trg` trigger and `operations_guid_registry_fk` FK |
+| `SET session_replication_role = replica` + duplicate GUID | **Accepted** (2 rows) → see limitation below |
+
+### Known limitation (and a correction to the plan review)
+
+`session_replication_role = replica` disables **all** triggers, including the internal ones that enforce foreign keys. In that mode neither the registry trigger nor the composite FK fires, and a duplicate GUID gets in. The plan review (R-02) wrongly listed this role among the cases the composite FK protects against. It has been corrected there with a note.
+
+Why this is acceptable: setting the role requires superuser, and a superuser can bypass any constraint anyway. The only mechanism that survives the `replica` role is a unique **index**, and PostgreSQL can't build a global unique index across partitions. That is the root cause of the whole requirement. On the subscriber, the apply worker does run in the `replica` role, but it only applies changes that were already validated on the publisher.

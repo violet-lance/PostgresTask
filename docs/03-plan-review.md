@@ -42,7 +42,7 @@ ERROR:  transition tables cannot be specified for triggers with column lists
 
 ### R-02 · Major · GUID uniqueness silently depended on the trigger — *fixed, confirmed by spike*
 
-The plan had registry `PK (operation_guid)` + FK `operations(operation_guid) → registry`. If the registry trigger is disabled (e.g. bulk load, `session_replication_role = replica`, human error), two T1 rows with the same GUID in different partitions can both reference **the same** registry row → duplicate accepted. The guarantee came from procedural code, which is exactly what D-07 wanted to avoid.
+The plan had registry `PK (operation_guid)` + FK `operations(operation_guid) → registry`. If the registry trigger is disabled (e.g. `ALTER TABLE … DISABLE TRIGGER` for a bulk load, human error), two T1 rows with the same GUID in different partitions can both reference **the same** registry row → duplicate accepted. The guarantee came from procedural code, which is exactly what D-07 wanted to avoid.
 
 **Resolution (accepted, amends D-07):** make the uniqueness fully declarative with a composite FK:
 
@@ -59,6 +59,8 @@ Spike evidence — same GUID, other partition, **trigger disabled**:
 ```
 ERROR:  insert or update on table "operations_2026_11" violates foreign key constraint "operations_operation_guid_op_date_fkey"
 ```
+
+> **Correction (found in Stage 2):** the first version of this finding listed `session_replication_role = replica` as one of the scenarios the composite FK protects against. **That was wrong.** FK enforcement is itself implemented with (internal) triggers, and the `replica` role disables those too. Stage 2 tested it: a duplicate GUID **was accepted** in a `replica`-role session. The composite FK protects against a disabled *user* trigger, not against the `replica` role. The `replica` role is superuser-only, and the only thing that survives it is a unique **index**, which PostgreSQL can't build across partitions. This is recorded as a known limitation in the [implementation log](04-implementation-log.md#stage-2--guid-uniqueness-requirement-3).
 
 ### R-03 · Major · Rows in `DEFAULT` block creating that month's partition — *confirmed by spike*
 

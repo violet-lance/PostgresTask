@@ -14,6 +14,10 @@
 -- account always belongs to the same client (D-13). Layout of a UA IBAN:
 --   'UA' + 2 check digits + 6-digit bank code (MFO) + 19-digit account number.
 -- The check digits are real ISO 13616 mod-97 digits, so the numbers pass IBAN validation.
+-- Domain: client_id 1..9 999 999 999 (10 digits), account_no 1..99 999 (5 digits).
+-- Outside it the function returns NULL (lpad would silently TRUNCATE longer values and
+-- produce colliding accounts — stage-3 review S3-02); a NULL account_number is then
+-- rejected by the message CHECK constraint on ops.operations.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION ops.client_account(p_client_id bigint, p_account_no int)
 RETURNS text
@@ -29,7 +33,9 @@ BEGIN ATOMIC
     )
     -- IBAN check digits: 98 - (BBAN || 'UA' as digits (U=30, A=10) || '00') mod 97
     SELECT 'UA' || lpad((98 - ((b.bban || '301000')::numeric % 97))::text, 2, '0') || b.bban
-    FROM b;
+    FROM b
+    WHERE p_client_id BETWEEN 1 AND 9999999999
+      AND p_account_no BETWEEN 1 AND 99999;
 END;
 
 COMMENT ON FUNCTION ops.client_account(bigint, int) IS
@@ -120,8 +126,13 @@ BEGIN
         PERFORM pg_catalog.setseed(p_seed);   -- reproducible dates/amounts/clients (GUIDs stay random)
     END IF;
 
-    -- Partitions for the whole range first, so nothing lands in DEFAULT.
-    PERFORM ops.ensure_monthly_partitions((p_from AT TIME ZONE 'UTC')::date, 2);
+    -- Partitions for exactly the months of [p_from, p_to) first, so nothing lands in DEFAULT.
+    -- (Not ensure_monthly_partitions(p_from, ...): that fills every month from p_from up to
+    -- now + 2, i.e. dozens of empty partitions for a historical range — stage-3 review S3-01.)
+    PERFORM ops.create_month_partition(m::date)
+    FROM pg_catalog.generate_series(date_trunc('month', p_from AT TIME ZONE 'UTC'),
+                                    date_trunc('month', (p_to - interval '1 microsecond') AT TIME ZONE 'UTC'),
+                                    interval '1 month') AS m;
     COMMIT;
 
     WHILE v_done < p_rows LOOP

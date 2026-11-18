@@ -244,3 +244,7 @@ Measured in a rolled-back transaction: 10k-row inserts into T1 vs. an identical 
 | With registry (trigger + FK + registry indexes) | 939, 967, 932 |
 
 ≈ **+35% (~25 µs per row)**. Irrelevant for the 5-second job and acceptable for bulk loads, so UUIDv7 is **not** introduced. The decision is now backed by a measurement.
+
+### Stage 3 review
+
+Reviewed after the stage commit → [reviews/stage-3-review.md](reviews/stage-3-review.md). Fixes: the generator no longer creates empty partitions between a historical `p_from` and now (S3-01, 66 empty partitions in a test); `client_account()` returns NULL outside its domain instead of silently truncating into colliding IBANs (S3-02); verify check 1 reports FAIL instead of erroring (S3-03). `p_seed` determinism verified (after correcting my own flawed first test). All 12 checks of `verify/02` were negative-tested and fail as expected. Carried to Stage 6: MV staleness after inserting status-1 rows (S3-06).

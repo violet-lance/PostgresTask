@@ -11,8 +11,9 @@ CREATE TEMP TABLE vr (n serial, check_name text, passed boolean, details text) O
 -- 1. Generator is a stored procedure
 INSERT INTO vr (check_name, passed, details)
 SELECT 'ops.generate_operations is a stored PROCEDURE', count(*) = 1,
-       string_agg(oid::regprocedure::text, '; ')
-FROM pg_proc WHERE oid = 'ops.generate_operations'::regproc AND prokind = 'p';
+       coalesce(string_agg(p.oid::regprocedure::text, '; '), 'not found')
+FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = 'ops' AND p.proname = 'generate_operations' AND p.prokind = 'p';
 
 -- 2. Volume
 INSERT INTO vr (check_name, passed, details)

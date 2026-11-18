@@ -1,0 +1,87 @@
+name: postgres-task
+
+x-postgres-common: &postgres-common
+  build:
+    context: ./docker/postgres
+  image: postgres-task/postgres:17.12-cron
+  environment: &postgres-env
+    POSTGRES_USER: ${POSTGRES_USER:-postgres}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    POSTGRES_DB: ${POSTGRES_DB:-opsdb}
+    REPLICATOR_PASSWORD: ${REPLICATOR_PASSWORD:-replicator}
+    TZ: UTC
+  healthcheck:
+    # TCP is only opened after the init scripts finish (the entrypoint's temporary
+    # init server listens on the unix socket only), so "healthy" == "fully initialised".
+    test: ["CMD-SHELL", "pg_isready -h localhost -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+    interval: 3s
+    timeout: 3s
+    retries: 10
+    start_period: 180s
+
+services:
+  pg-primary:
+    <<: *postgres-common
+    container_name: pg-primary
+    hostname: pg-primary
+    environment:
+      <<: *postgres-env
+      INSTANCE_ROLE: primary
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_cron
+      - -c
+      - cron.database_name=${POSTGRES_DB:-opsdb}
+      - -c
+      - cron.use_background_workers=on
+      - -c
+      - max_worker_processes=32
+      - -c
+      - wal_level=logical
+      - -c
+      - timezone=UTC
+      - -c
+      - log_timezone=UTC
+    ports:
+      - "${PRIMARY_PORT:-5433}:5432"
+    volumes:
+      - ./sql/common:/sql/common:ro
+      - ./sql/primary:/sql/primary:ro
+      - pg-primary-data:/var/lib/postgresql/data
+
+  pg-replica:
+    <<: *postgres-common
+    container_name: pg-replica
+    hostname: pg-replica
+    environment:
+      <<: *postgres-env
+      INSTANCE_ROLE: replica
+      PRIMARY_HOST: pg-primary
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_cron
+      - -c
+      - cron.database_name=${POSTGRES_DB:-opsdb}
+      - -c
+      - cron.use_background_workers=on
+      - -c
+      - max_worker_processes=32
+      - -c
+      - timezone=UTC
+      - -c
+      - log_timezone=UTC
+    ports:
+      - "${REPLICA_PORT:-5434}:5432"
+    volumes:
+      - ./sql/common:/sql/common:ro
+      - ./sql/replica:/sql/replica:ro
+      - pg-replica-data:/var/lib/postgresql/data
+    depends_on:
+      pg-primary:
+        condition: service_healthy
+
+volumes:
+  pg-primary-data:
+  pg-replica-data:

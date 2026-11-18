@@ -248,3 +248,46 @@ Measured in a rolled-back transaction: 10k-row inserts into T1 vs. an identical 
 ### Stage 3 review
 
 Reviewed after the stage commit → [reviews/stage-3-review.md](reviews/stage-3-review.md). Fixes: the generator no longer creates empty partitions between a historical `p_from` and now (S3-01, 66 empty partitions in a test); `client_account()` returns NULL outside its domain instead of silently truncating into colliding IBANs (S3-02); verify check 1 reports FAIL instead of erroring (S3-03). `p_seed` determinism verified (after correcting my own flawed first test). All 12 checks of `verify/02` were negative-tested and fail as expected. Carried to Stage 6: MV staleness after inserting status-1 rows (S3-06).
+
+---
+
+## Stage 4 — Insert job every 5 s (requirement 4)
+
+Date: 2026-11-18 · Commit: `feat: pg_cron job inserting a pending operation every 5 seconds (stage 4, req 4)`
+
+### What was done
+
+| File | Content |
+|------|---------|
+| `sql/primary/06_job_functions.sql` | `ops.insert_random_operation(p_clients)` → inserts one row with `status = 0`, `op_date = now()`, returns the new id. It reuses `random_amount()` / `random_message()` from the generator, so job rows look like generated rows and pass through the same GUID registry path |
+| `sql/primary/08_jobs.sql` | `cron.schedule('insert-operation', '5 seconds', 'SELECT ops.insert_random_operation()')`; housekeeping job `cron-history-cleanup` (daily 00:30, keeps 3 days of `cron.job_run_details`) |
+| `verify/04_insert_job.sql` | 6 checks, rolled back |
+
+### Additions beyond the plan
+
+- **`cron-history-cleanup` job.** Every run of a second-level job writes a row into `cron.job_run_details`: 17 280/day for the 5-s job, 28 800/day for the 3-s job (Stage 5). That's ~46k rows/day, unbounded. A daily purge keeps 3 days, which is enough for verification and troubleshooting.
+
+### Verification
+
+After ~75 s of runtime, `verify/04_insert_job.sql` — **6/6 PASS**:
+
+```
+1 | PASS | pg_cron job "insert-operation": active, every 5 seconds, calls ops.insert_random_operation()
+2 | PASS | ops.insert_random_operation() inserts one row with status = 0 and op_date = now()
+3 | PASS | Job runs in the last 2 minutes all succeeded (>= 10 runs expected)  | 20 runs, 0 failed
+4 | PASS | Consecutive runs start every 5 s (each gap within 4.5..5.5 s)       | 19 gaps: min 5.00 s, avg 5.00 s, max 5.00 s
+5 | PASS | Each succeeded run inserted exactly one operation                    | 20 runs checked
+6 | PASS | Housekeeping job "cron-history-cleanup" is scheduled
+```
+
+**Negative runs** (mutation inside a rolled-back transaction → the targeted check must FAIL): schedule changed to 10 s → #1 FAIL; function replaced by one inserting status 1 → #2 FAIL; last run marked failed → #3 FAIL; one run removed from history (10-s gap) → #4 FAIL; one job-inserted row deleted → #5 FAIL; cleanup job removed → #6 FAIL. Jobs were unchanged afterwards.
+
+Regressions: `01_table` 10/10, `02_generator` 12/12, `03_guid_uniqueness` 12/12.
+
+### Problems found during implementation
+
+- **Verification check #2 initially failed, but the bug was in the check, not the code.** It called the function inside a CTE and joined `ops.operations` in the same statement. Rows inserted by a function during a statement are not visible to that statement's snapshot, so the join found nothing. Fixed by calling the function in a separate statement (`\gset`) and querying afterwards.
+
+### Observation
+
+pg_cron's interval schedules are very regular here: all gaps were exactly 5.00 s (to two decimals). This matters for Stage 5, where the *parity of the second* decides which ids get confirmed.

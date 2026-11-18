@@ -486,3 +486,27 @@ Reviewed after the stage commit → [reviews/stage-7-review.md](reviews/stage-7-
 - Sequences, DDL, TRUNCATE and credentials are documented.
 
 Fresh re-init: replication 16/16, primary 60/60, replica `01_table` 10/10 PASS.
+
+---
+
+## Stage 8 — Verification runner & README
+
+Date: 2026-11-18 · Commit: `docs: verification runner and final README (stage 8)`
+
+### What was done
+
+| File | Content |
+|------|---------|
+| `verify/run.sh` | Checks that both containers are ready, waits until the jobs have ≥ 90 s of history, runs all verification scripts (`01` on both instances, `02`–`06` on the primary, `07` replication runner), prints a summary, exits 1 on any FAIL/ERROR |
+| `verify/run.ps1` | Windows wrapper that runs `run.sh` with Git Bash |
+| `README.md` | Quick start, architecture sketch, requirement → objects → SQL → verification map, how to watch each feature, design highlights, known limitations, troubleshooting, documentation index |
+
+### Verification
+
+- Fresh `docker compose down -v && up -d --wait`, then `bash verify/run.sh`: **86 PASS / 0 FAIL, exit code 0** (1 min 35 s including the 90-s wait for job history).
+- Negative run: insert job deactivated → `84 PASS / 2 FAIL`, **exit code 1**. Job re-activated.
+- `powershell -File verify\run.ps1` → 86/86, exit code 0.
+
+### Problem found during implementation
+
+- **`run.ps1` first failed on this machine** with `WSL … execvpe(/bin/bash) failed`. In PowerShell, `bash` on `PATH` is `C:\Windows\System32\bash.exe`, the WSL launcher, and no WSL distribution is installed. The wrapper now looks for Git Bash first (standard install locations, or next to `git.exe`) and falls back to `bash` on `PATH` only if Git Bash isn't found.

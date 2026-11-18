@@ -356,3 +356,7 @@ Why the scheduled second isn't used instead: inside the function only `now()` is
 1. **Check 8 was too strict.** The planner picks `Seq Scan` for *empty* partitions (`relpages = 0`: future months, `DEFAULT`), which costs nothing. The check now forbids seq scans only on partitions that hold data.
 2. **Check 9 counted the verification's own direct call** (check 7 calls the function inside the same transaction, adding a log row). It now excludes `run_at = now()`. A first ad-hoc query to locate the non-alternating pair was itself wrong (it returned no rows) and was redone.
 3. **Two negative-test mutations initially did nothing.** They targeted `max(run_id) - 1` / `max(runid) - 2`, but identity values consumed by rolled-back verification runs leave gaps, so those rows didn't exist. The mutations now pick rows by `ORDER BY … OFFSET`, and I confirmed that each one deletes exactly one row before trusting the resulting FAIL.
+
+### Stage 5 review
+
+Reviewed after the stage commit → [reviews/stage-5-review.md](reviews/stage-5-review.md). **Major fix:** a single pending row locked by another session stalled the confirm job for 10.4 s (3 runs skipped). Candidates are now selected with `FOR UPDATE SKIP LOCKED`; with the same lock the runs take ≤ 13 ms and the locked row is confirmed right after release. Confirmation latency was characterised (structurally up to ~6 s: 5-s insert grid vs 3-s parity grid). Fresh re-init: full suite 49/49 PASS. Carried to Stage 6: confirm run duration with the MV refresh.

@@ -84,14 +84,15 @@ CREATE TEMP TABLE plan_lines (line text) ON COMMIT DROP;
 DO $$
 DECLARE r record;
 BEGIN
-    FOR r IN EXECUTE 'EXPLAIN (COSTS OFF) UPDATE ops.operations SET status = 1 WHERE status = 0 AND id % 2 = 0' LOOP
+    -- the candidate query of ops.confirm_operations_by_parity()
+    FOR r IN EXECUTE 'EXPLAIN (COSTS OFF) SELECT id, op_date FROM ops.operations WHERE status = 0 AND id % 2 = 0 FOR UPDATE SKIP LOCKED' LOOP
         INSERT INTO plan_lines VALUES (r."QUERY PLAN");
     END LOOP;
 END $$;
 -- A Seq Scan is fine (and chosen by the planner) on EMPTY partitions (relpages = 0:
 -- future months, DEFAULT); it must not appear on partitions that hold data.
 INSERT INTO vr (check_name, passed, details)
-SELECT 'Confirm UPDATE uses the partial index on every non-empty partition',
+SELECT 'Confirm candidate query uses the partial index on every non-empty partition',
        count(*) FILTER (WHERE s.seq_rel IS NOT NULL AND c.relpages > 0) = 0
          AND (SELECT count(*) FROM plan_lines WHERE line ILIKE '%Index Scan using %_id_idx%') > 0,
        format('%s index scan node(s) on *_id_idx; seq scans: %s',

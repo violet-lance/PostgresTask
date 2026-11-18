@@ -75,13 +75,24 @@ DECLARE
     v_rows    int;
     v_ids     bigint[];
 BEGIN
-    -- Uses the partial index operations_pending_id_ix (id) WHERE status = 0.
-    WITH confirmed AS (
-        UPDATE ops.operations
+    -- Candidates come from the partial index operations_pending_id_ix (id) WHERE status = 0.
+    -- FOR UPDATE SKIP LOCKED (stage-5 review S5-01): a pending row locked by someone else
+    -- (long transaction, SELECT ... FOR UPDATE) is skipped instead of blocking the whole run;
+    -- a later run with the same parity confirms it. Without it, one locked row stalled the
+    -- job for 10.4 s in a test (3 runs lost, other operations waiting).
+    WITH candidates AS (
+        SELECT o.id, o.op_date
+        FROM   ops.operations o
+        WHERE  o.status = 0
+          AND  o.id % 2 = v_parity
+        FOR UPDATE SKIP LOCKED
+    ),
+    confirmed AS (
+        UPDATE ops.operations o
         SET    status = 1
-        WHERE  status = 0
-          AND  id % 2 = v_parity
-        RETURNING id
+        FROM   candidates c
+        WHERE  o.id = c.id AND o.op_date = c.op_date     -- full PK: one index probe per row
+        RETURNING o.id
     )
     SELECT count(*), coalesce(array_agg(id ORDER BY id), '{}')
     INTO   v_rows, v_ids

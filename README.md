@@ -23,5 +23,5 @@ How the solution was designed, step by step:
 2. Grilling sessions: [1 — architecture](docs/01-grilling-session-1.md) · [2 — integrity & aggregation](docs/01-grilling-session-2.md) · [3 — data & replica](docs/01-grilling-session-3.md) · [4 — conventions](docs/01-grilling-session-4.md)
 3. [Implementation plan](docs/02-plan.md)
 4. [Plan review](docs/03-plan-review.md) (with a [feasibility spike](docs/spikes/plan-review-spike.sql))
-5. [Implementation log](docs/04-implementation-log.md) · stage reviews: [stage 1](docs/reviews/stage-1-review.md) · [stage 2](docs/reviews/stage-2-review.md) · [stage 3](docs/reviews/stage-3-review.md) · [stage 4](docs/reviews/stage-4-review.md)
+5. [Implementation log](docs/04-implementation-log.md) · stage reviews: [stage 1](docs/reviews/stage-1-review.md) · [stage 2](docs/reviews/stage-2-review.md) · [stage 3](docs/reviews/stage-3-review.md) · [stage 4](docs/reviews/stage-4-review.md) · [stage 5](docs/reviews/stage-5-review.md)
 6. [Decision log](docs/decisions.md)

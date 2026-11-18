@@ -417,3 +417,11 @@ The negative runs exposed four weaknesses in the script itself, all fixed:
 2. **#7 produced a syntax error instead of FAIL** when a refresh was missing: psql's `\gset` leaves a variable **unset** for a NULL value, so `:t_offline` reached the server literally. Values are now coalesced to text.
 3. **#8 couldn't fail:** the script's own test (#5) created a fresh 0→1 refresh before #8 ran. #8 now looks only at refreshes not made by this transaction.
 4. Two typos (a `\gset` variable read through `current_setting()`, an extra parenthesis) were caught on the first run.
+
+### Stage 6 review
+
+Reviewed after the stage commit → [reviews/stage-6-review.md](reviews/stage-6-review.md). Two **major concurrency defects** were reproduced with the jobs paused, then fixed and re-tested:
+- **Lost update via the snapshot race:** a `REFRESH` that waited for another refresh used a snapshot taken before the other transaction committed, and undid its change (MV −1000.00 vs live). Fixed by an advisory lock taken in a separate statement before `REFRESH` (`LOCK TABLE` doesn't support materialized views).
+- **Deadlock** between a multi-statement transaction and the confirm path. Fixed: the confirm function takes that lock first, with `lock_timeout = 2s`.
+
+Added `ops.refresh_totals()` for safe manual refreshes. Refresh cost measured: 45 ms at 100k, ~56 ms at 300k confirmed rows (parallel aggregate). Fresh re-init: full suite 60/60 PASS.

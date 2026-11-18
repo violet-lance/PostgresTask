@@ -31,6 +31,22 @@ COMMENT ON FUNCTION ops.insert_random_operation(int) IS
     'Requirement 4: inserts one random operation with status = 0 (pending). Scheduled every 5 seconds.';
 
 
+-- -----------------------------------------------------------------------------
+-- Key of the transaction-level advisory lock that serialises refreshes of the
+-- materialized view ops.client_type_totals (stage-6 review S6-01/S6-02).
+-- LOCK TABLE is not supported for materialized views, hence an advisory lock.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION ops.mv_refresh_lock_key()
+RETURNS bigint
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+SET search_path = ops, pg_catalog
+RETURN 7400001;   -- arbitrary constant, unique within this database
+
+COMMENT ON FUNCTION ops.mv_refresh_lock_key() IS
+    'Advisory lock key serialising refreshes of ops.client_type_totals (see 07_materialized_view.sql).';
+
+
 -- =============================================================================
 -- Requirement 5: every 3 seconds confirm (0 -> 1) pending operations whose id has the
 -- same parity as the current second.
@@ -66,6 +82,7 @@ RETURNS int
 LANGUAGE plpgsql
 VOLATILE
 SET search_path = ops, pg_catalog
+SET lock_timeout = '2s'
 AS $$
 DECLARE
     v_run_at  timestamptz := now();
@@ -75,6 +92,15 @@ DECLARE
     v_rows    int;
     v_ids     bigint[];
 BEGIN
+    -- Take the MV-refresh lock BEFORE locking any row (stage-6 review S6-02): the refresh
+    -- trigger fired by the UPDATE below needs it, and waiting for it while already holding
+    -- row locks can deadlock with a transaction that holds it and wants one of those rows.
+    -- In this order the job never waits for the lock while holding row locks (rows are
+    -- taken with SKIP LOCKED, so it never waits for rows either). If another transaction
+    -- holds the lock for more than lock_timeout (2 s), this run fails visibly in
+    -- cron.job_run_details and the next run retries.
+    PERFORM pg_advisory_xact_lock(ops.mv_refresh_lock_key());
+
     -- Candidates come from the partial index operations_pending_id_ix (id) WHERE status = 0.
     -- FOR UPDATE SKIP LOCKED (stage-5 review S5-01): a pending row locked by someone else
     -- (long transaction, SELECT ... FOR UPDATE) is skipped instead of blocking the whole run;

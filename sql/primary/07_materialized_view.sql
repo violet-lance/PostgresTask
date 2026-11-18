@@ -37,7 +37,7 @@ COMMENT ON MATERIALIZED VIEW ops.client_type_totals IS
 CREATE TABLE IF NOT EXISTS ops.mv_refresh_log (
     refresh_id             bigint        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     refreshed_at           timestamptz   NOT NULL,
-    trigger_op             text          NOT NULL CHECK (trigger_op IN ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE')),
+    trigger_op             text          NOT NULL CHECK (trigger_op IN ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'MANUAL')),
     rows_flipped_0_to_1    bigint        NOT NULL,   -- the requirement's case
     rows_changed_confirmed bigint        NOT NULL,   -- all rows that changed the confirmed set (incl. 0 -> 1)
     duration_ms            numeric(10,3) NOT NULL
@@ -91,6 +91,16 @@ BEGIN
     END IF;
 
     IF v_changed <> 0 THEN
+        -- Serialise refreshes and, crucially, take the lock in a SEPARATE statement BEFORE
+        -- the REFRESH (stage-6 review S6-01). In READ COMMITTED a statement's snapshot is
+        -- taken when the statement starts; REFRESH's own ExclusiveLock wait happens after
+        -- that, so a REFRESH that waited for another one would recompute from a snapshot
+        -- taken BEFORE the other transaction committed and silently undo its changes
+        -- (reproduced: MV lost a +1000.00 change). Waiting here instead means the REFRESH
+        -- statement below starts after the other transaction has committed and sees it.
+        -- (LOCK TABLE is not supported for materialized views, hence an advisory lock.)
+        PERFORM pg_advisory_xact_lock(ops.mv_refresh_lock_key());
+
         REFRESH MATERIALIZED VIEW CONCURRENTLY ops.client_type_totals;
 
         INSERT INTO ops.mv_refresh_log (refreshed_at, trigger_op, rows_flipped_0_to_1, rows_changed_confirmed, duration_ms)
@@ -128,3 +138,31 @@ DROP TRIGGER IF EXISTS operations_totals_trunc_trg ON ops.operations;
 CREATE TRIGGER operations_totals_trunc_trg
     AFTER TRUNCATE ON ops.operations
     FOR EACH STATEMENT EXECUTE FUNCTION ops.refresh_client_type_totals();
+
+
+-- -----------------------------------------------------------------------------
+-- Manual refresh entry point (stage-6 review S6-03). A bare
+-- "REFRESH MATERIALIZED VIEW ops.client_type_totals" bypasses the advisory lock and can
+-- hit the snapshot race described above when it overlaps with a trigger refresh.
+-- Use SELECT ops.refresh_totals(); instead.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION ops.refresh_totals()
+RETURNS numeric
+LANGUAGE plpgsql
+SET search_path = ops, pg_catalog
+AS $$
+DECLARE
+    v_started timestamptz := clock_timestamp();
+    v_ms      numeric;
+BEGIN
+    PERFORM pg_advisory_xact_lock(ops.mv_refresh_lock_key());   -- separate statement, before REFRESH
+    REFRESH MATERIALIZED VIEW CONCURRENTLY ops.client_type_totals;
+    v_ms := extract(epoch FROM clock_timestamp() - v_started) * 1000;
+    INSERT INTO ops.mv_refresh_log (refreshed_at, trigger_op, rows_flipped_0_to_1, rows_changed_confirmed, duration_ms)
+    VALUES (now(), 'MANUAL', 0, 0, v_ms);
+    RETURN v_ms;
+END;
+$$;
+
+COMMENT ON FUNCTION ops.refresh_totals() IS
+    'Safe manual refresh of ops.client_type_totals (takes the refresh advisory lock first). Returns duration in ms.';

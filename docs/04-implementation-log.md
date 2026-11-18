@@ -360,3 +360,60 @@ Why the scheduled second isn't used instead: inside the function only `now()` is
 ### Stage 5 review
 
 Reviewed after the stage commit → [reviews/stage-5-review.md](reviews/stage-5-review.md). **Major fix:** a single pending row locked by another session stalled the confirm job for 10.4 s (3 runs skipped). Candidates are now selected with `FOR UPDATE SKIP LOCKED`; with the same lock the runs take ≤ 13 ms and the locked row is confirmed right after release. Confirmation latency was characterised (structurally up to ~6 s: 5-s insert grid vs 3-s parity grid). Fresh re-init: full suite 49/49 PASS. Carried to Stage 6: confirm run duration with the MV refresh.
+
+---
+
+## Stage 6 — Materialized view (requirement 6)
+
+Date: 2026-11-18 · Commit: `feat: materialized view of confirmed totals refreshed by statement triggers (stage 6, req 6)`
+
+### Decision taken before implementation (D-21)
+
+The requirement names one event: "refresh on every status update 0 → 1". But the "current total of confirmed operations" also changes on 1 → 0, on an amount/message change of a confirmed operation, on inserting a row that is already confirmed (stage-3 review S3-06: a later generator call), on deleting a confirmed row, and on `TRUNCATE`. With a 0→1-only trigger, the MV would silently show stale totals after any of those. **Chosen:** refresh whenever the confirmed set changes. 0→1 is still the requirement's case and is logged separately. Statements that don't touch confirmed rows (the 5-s job inserting status 0, a confirm run that found nothing) never refresh.
+
+### What was done
+
+| File | Content |
+|------|---------|
+| `sql/primary/07_materialized_view.sql` | `MATERIALIZED VIEW ops.client_type_totals (client_id, operation_type, total_amount, operations_count)` over `status = 1`, unique index `(client_id, operation_type)`; `ops.mv_refresh_log`; trigger function `ops.refresh_client_type_totals()`; 4 statement-level triggers (INSERT / UPDATE / DELETE with transition tables, TRUNCATE) |
+| `verify/06_materialized_view.sql` | 11 checks, rolled back |
+
+Details:
+- **One trigger per event:** PostgreSQL doesn't allow transition tables on a trigger with more than one event. The UPDATE trigger has no column list (plan review R-01).
+- The UPDATE path joins `old_rows`/`new_rows` on the PK and counts (a) 0→1 flips and (b) rows confirmed before or after whose `(status, amount, client_id, operation_type)` changed. It refreshes only if (b) > 0.
+- `REFRESH MATERIALIZED VIEW CONCURRENTLY` runs inside the triggering transaction. Errors are not caught: a failed refresh aborts the statement (D-16).
+- `mv_refresh_log.refreshed_at = now()` of the transaction. For job-caused refreshes this is **equal** to `confirm_job_log.run_at`, which gives an exact join for verification.
+- Created after the seed (init order from Stage 3), so it is built from seeded data `WITH DATA` and the seed causes no refreshes.
+
+### Verification
+
+`verify/06_materialized_view.sql` — **11/11 PASS**:
+
+```
+ 1 | PASS | ops.client_type_totals is a populated MATERIALIZED VIEW with a unique index
+ 2 | PASS | MV equals the live aggregate of confirmed operations (all groups)   | 0 differing group(s); 2000 groups
+ 3 | PASS | Statement-level refresh triggers on INSERT, UPDATE, DELETE, TRUNCATE
+ 4 | PASS | Every confirm run with rows 0 -> 1 refreshed the MV in the same transaction (and only those)
+                                                                              | 32 runs: 20 with confirmations -> 20 refreshed; 12 without -> 0 refreshed
+ 5 | PASS | Status 0 -> 1 refreshes the MV: client total appears with exactly the amount | pending insert: +0; 0->1: +1; total = 123.45
+ 6 | PASS | Updates that do not change the confirmed set do not refresh
+ 7 | PASS | Amount change, insert with status 1, 1 -> 0 and delete of confirmed rows also refresh | +4 refreshes (expected 4)
+ 8 | PASS | Refresh log of the confirm job records the 0 -> 1 flips
+ 9 | PASS | Failed refresh aborts the status update (D-16)  | error: cannot refresh materialized view ... concurrently; status after: 0
+10 | PASS | Refresh duration acceptable for a 3-second job   | avg 52.0 ms, p95 59.0 ms, max 63.4 ms
+11 | PASS | TRUNCATE of T1 refreshes the MV (empty afterwards)
+```
+
+**Carried item closed — S5-07 (confirm run duration with the refresh):** a refresh (full aggregate over ~100k rows + concurrent diff of 2000 groups) takes **~52 ms avg, p95 59 ms**. The confirm job runs every 3 s, so that is < 2% of the interval.
+
+**Negative runs:** every check fails on its mutation, e.g. the update trigger disabled → #5 FAIL; the insert trigger disabled → #7 FAIL (+3 instead of 4); a refresh function that swallows errors → #9 FAIL (`error: none … inside the block: 1`); the unique index dropped → #1 FAIL. Mutations that break the MV itself (dropping its index) also make the behavioural checks error out. For #1 the check's predicate was therefore tested separately.
+
+Full suite: `01` 10/10, `02` 12/12, `03` 12/12, `04` 6/6, `05` 9/9, `06` 11/11.
+
+### Problems found during implementation (all in the verification script)
+
+The negative runs exposed four weaknesses in the script itself, all fixed:
+1. **#9 could leave the MV's unique index dropped** if the UPDATE wrongly succeeded, because its subtransaction committed. A later check then errored and hid all results. The inner block now *always* ends with a deliberate exception, so the `DROP INDEX` is always undone, and the status seen inside is captured before that.
+2. **#7 produced a syntax error instead of FAIL** when a refresh was missing: psql's `\gset` leaves a variable **unset** for a NULL value, so `:t_offline` reached the server literally. Values are now coalesced to text.
+3. **#8 couldn't fail:** the script's own test (#5) created a fresh 0→1 refresh before #8 ran. #8 now looks only at refreshes not made by this transaction.
+4. Two typos (a `\gset` variable read through `current_setting()`, an extra parenthesis) were caught on the first run.

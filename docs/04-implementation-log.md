@@ -295,3 +295,64 @@ pg_cron's interval schedules are very regular here: all gaps were exactly 5.00 s
 ### Stage 4 review
 
 Reviewed after the stage commit → [reviews/stage-4-review.md](reviews/stage-4-review.md). Main output: a measurement of pg_cron timing. Interval runs are aligned to the wall clock (:00, :05, …), never skipped or doubled, and the start stays inside the scheduled second (intra-second offset drifts 0→997 ms and wraps). But `now()` inside the job lags by 1–12 ms and can occasionally fall into the next second. Stage 5 therefore verifies parity per run rather than requiring strict alternation. One misleading comment fixed.
+
+---
+
+## Stage 5 — Confirm job every 3 s by seconds parity (requirement 5)
+
+Date: 2026-11-18 · Commit: `feat: parity-based confirm job every 3 seconds with audit log (stage 5, req 5)`
+
+### What was done
+
+| File | Content |
+|------|---------|
+| `sql/primary/06_job_functions.sql` | `ops.confirm_job_log` (audit, D-19: `run_at`, `run_second`, `parity`, `rows_confirmed`, `confirmed_ids bigint[]`, `duration_ms`); `ops.confirm_operations_by_parity()`; `ops.housekeeping(p_keep)` |
+| `sql/primary/08_jobs.sql` | `confirm-operations` every `3 seconds`; the Stage 4 `cron-history-cleanup` job is replaced by `housekeeping` → `ops.housekeeping()`, which prunes `cron.job_run_details`, `confirm_job_log` and (once it exists) `mv_refresh_log` |
+| `verify/05_confirm_job.sql` | 9 checks; `verify/04` check 6 updated for the renamed housekeeping job |
+
+The function:
+```sql
+v_run_at := now();                                        -- moment the confirming transaction runs
+v_parity := floor(extract(epoch FROM v_run_at))::bigint % 2;
+UPDATE ops.operations SET status = 1 WHERE status = 0 AND id % 2 = v_parity RETURNING id;   -- partial index
+INSERT INTO ops.confirm_job_log (...);                    -- exact evidence of which ids were confirmed
+```
+
+### Bug in the plan, caught before coding
+
+The plan said `v_parity := extract(second from now())::int % 2`. `extract(second …)` returns a **fraction** (e.g. `20.613`), and a `::int` cast **rounds** it (→ 21), so the parity would be wrong for every run that happens in the second half of a second. The implementation uses `floor()` on the epoch, which also makes it independent of the session time zone. Since 60 is even, epoch-second parity equals second-of-minute parity.
+
+### Verification
+
+After ~2 min of runtime, `verify/05_confirm_job.sql` — **9/9 PASS**:
+
+```
+1 | PASS | pg_cron job "confirm-operations": active, every 3 seconds
+2 | PASS | Runs in the last 2 minutes all succeeded, every 3 s       | 40 runs, 0 failed; gaps min 3.00 / avg 3.00 / max 3.00 s
+3 | PASS | Every succeeded run wrote exactly one confirm_job_log row
+4 | PASS | Rule holds for every logged run: even second -> only even ids, odd second -> only odd ids
+                                                                  | 55 runs (28 even / 27 odd), 479 ids confirmed, 0 violating run(s)
+5 | PASS | Every id in the audit log is confirmed (status = 1) in T1
+6 | PASS | No operation stays pending longer than 10 s (both parities are processed)
+7 | PASS | Direct call confirms exactly the id whose parity matches the current second | parity=1; id 100036 -> 0, id 100037 -> 1
+8 | PASS | Confirm UPDATE uses the partial index on every non-empty partition
+9 | PASS | Consecutive job runs alternate parity in >= 90% of cases  | 53 of 54 (98.1%); non-alternating: 19:20:06.997 -> 19:20:10.000
+```
+
+The ~400 pending seed rows of the last 24 h were confirmed in the first two runs (one even, one odd). After that, each run confirms the ≤ 1 row inserted by the 5-s job, if its parity matches.
+
+**Negative runs: all 9 checks fail on their mutation** (schedule changed; a run removed from history; an audit row removed; a wrong-parity id injected into the log; a logged id reset to 0; an old pending row; the function replaced by one ignoring parity; the partial index dropped; the parity log falsified).
+
+All verifications: `01` 10/10, `02` 12/12, `03` 12/12, `04` 6/6, `05` 9/9.
+
+### The stage-4 prediction, observed
+
+One pair of consecutive runs did **not** alternate: `19:20:06.997` (second 06, even) → `19:20:10.000` (second 10, even). The run scheduled for second 09 started at ~`09.99x`, and `now()` in its transaction was already `10.000`. This is exactly the case predicted by the [stage-4 review](reviews/stage-4-review.md) (S4-01). The rule was still applied correctly (an even second → even ids). The intra-second offset of pg_cron starts drifts by ~1 ms/s, so it passes the `.99x` zone about once per ~15-minute cycle. Strict alternation is therefore reported as a statistic (≥ 90%), not required.
+
+Why the scheduled second isn't used instead: inside the function only `now()` is known. pg_cron's start can be anywhere in the scheduled second (offset 0–999 ms) while `now()` lags by 1–12 ms, so no fixed tolerance can map `now()` back to the scheduled second (a `.005` start and a `.995 + 10 ms` start look alike). Reading pg_cron's own `job_run_details` row from inside the job would couple the business function to scheduler internals. The task says "if the number of seconds is even": the moment the update actually executes is a faithful reading of that.
+
+### Problems found during implementation (all in the verification script, not in the code)
+
+1. **Check 8 was too strict.** The planner picks `Seq Scan` for *empty* partitions (`relpages = 0`: future months, `DEFAULT`), which costs nothing. The check now forbids seq scans only on partitions that hold data.
+2. **Check 9 counted the verification's own direct call** (check 7 calls the function inside the same transaction, adding a log row). It now excludes `run_at = now()`. A first ad-hoc query to locate the non-alternating pair was itself wrong (it returned no rows) and was redone.
+3. **Two negative-test mutations initially did nothing.** They targeted `max(run_id) - 1` / `max(runid) - 2`, but identity values consumed by rolled-back verification runs leave gaps, so those rows didn't exist. The mutations now pick rows by `ORDER BY … OFFSET`, and I confirmed that each one deletes exactly one row before trusting the resulting FAIL.

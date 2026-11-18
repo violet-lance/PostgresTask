@@ -61,11 +61,12 @@ FROM (
     WHERE r.status = 'succeeded' AND r.end_time < now() - interval '1 second'
 ) x;
 
--- 6. History cleanup job exists
+-- 6. Housekeeping job exists (prunes cron history and audit logs)
 INSERT INTO vr (check_name, passed, details)
-SELECT 'Housekeeping job "cron-history-cleanup" is scheduled', count(*) = 1 AND bool_and(active),
+SELECT 'Housekeeping job "housekeeping" is scheduled (calls ops.housekeeping())',
+       count(*) = 1 AND bool_and(active AND command ILIKE '%ops.housekeeping(%'),
        coalesce(string_agg(schedule || ' -> ' || command, '; '), 'job not found')
-FROM cron.job WHERE jobname = 'cron-history-cleanup';
+FROM cron.job WHERE jobname = 'housekeeping';
 
 SELECT n AS "#", CASE WHEN passed THEN 'PASS' ELSE 'FAIL' END AS result, check_name, details FROM vr ORDER BY n;
 ROLLBACK;

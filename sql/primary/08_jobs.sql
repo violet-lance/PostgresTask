@@ -12,8 +12,10 @@
 SELECT cron.schedule('insert-operation', '5 seconds',
                      'SELECT ops.insert_random_operation()') AS insert_operation_job_id;
 
--- Housekeeping: two second-level jobs write ~46k rows/day into cron.job_run_details.
--- Keep 3 days of history (enough for verification and troubleshooting).
-SELECT cron.schedule('cron-history-cleanup', '30 0 * * *',
-                     $$DELETE FROM cron.job_run_details WHERE end_time < now() - interval '3 days'$$)
-       AS cron_history_cleanup_job_id;
+-- Requirement 5: confirm pending operations with the parity of the current second, every 3 seconds.
+SELECT cron.schedule('confirm-operations', '3 seconds',
+                     'SELECT ops.confirm_operations_by_parity()') AS confirm_operations_job_id;
+
+-- Housekeeping: prune cron.job_run_details and the audit logs (keeps 3 days), daily 00:30 UTC.
+SELECT cron.schedule('housekeeping', '30 0 * * *',
+                     'SELECT ops.housekeeping()') AS housekeeping_job_id;

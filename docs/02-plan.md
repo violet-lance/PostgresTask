@@ -19,9 +19,9 @@ Derived from the decisions in [decisions.md](decisions.md). Each stage ends with
 │   ├── primary/                    # publisher-only objects (mounted into /docker-entrypoint-initdb.d)
 │   │   ├── 03_guid_registry.sql
 │   │   ├── 04_generator.sql
-│   │   ├── 05_job_functions.sql
-│   │   ├── 06_materialized_view.sql
-│   │   ├── 07_seed.sql
+│   │   ├── 05_seed.sql             # moved before the MV in Stage 3: the MV must be built from seeded data
+│   │   ├── 06_job_functions.sql
+│   │   ├── 07_materialized_view.sql
 │   │   ├── 08_jobs.sql
 │   │   └── 09_publication.sql
 │   └── replica/

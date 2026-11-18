@@ -174,3 +174,73 @@ Why this is acceptable: setting the role requires superuser, and a superuser can
 ### Stage 2 review
 
 Reviewed after the stage commit → [reviews/stage-2-review.md](reviews/stage-2-review.md). **Major fix:** idempotent retries (`INSERT … ON CONFLICT DO NOTHING` with an existing `(guid, op_date)`) failed on the registry because a BEFORE trigger fires before the table's conflict check. The trigger now distinguishes "same GUID, other date" (raises 23505) from "same GUID, same date" (left to T1's unique constraint). Concurrency re-tested for commit / rollback / `DO NOTHING` outcomes. Re-verified: 12/12 PASS (req 3), 10/10 PASS (req 1). Carried to Stage 3: measure insert cost (UUIDv4 vs v7).
+
+---
+
+## Stage 3 — Data generation (requirement 2)
+
+Date: 2026-11-18 · Commit: `feat: batched data generator procedure and 100k seed (stage 3, req 2)`
+
+### What was done
+
+| File | Content |
+|------|---------|
+| `sql/primary/04_generator.sql` | `ops.client_account()` (deterministic UA IBAN with real mod-97 check digits), `ops.client_account_count()`, `ops.random_message()`, `ops.random_amount()`, procedure `ops.generate_operations(p_rows, p_from, p_to, p_batch, p_clients, p_seed)` |
+| `sql/primary/05_seed.sql` | `CALL ops.generate_operations(100000, now() - 4 months, now(), 10000)` + `ANALYZE` |
+| `verify/02_generator.sql` | 12 read-only checks |
+
+Generator design:
+- **Chronological, set-based batches.** The period is split into slices proportional to each batch's share of rows; every batch is one `INSERT … SELECT … generate_series … ORDER BY op_date`, then `COMMIT`. So identity ids grow with `op_date` like in a real system, and a batch touches 1–2 partitions.
+- **Statuses (D-11):** older than `p_to − 24 h` → 1; inside the last 24 h, the probability of 0 grows linearly from 0 to 1 towards `p_to`.
+- **Domain (D-13):** 1000 clients; client *k* owns `1 + k % 3` accounts. Each account is a deterministic, valid UA IBAN (bank code from a fixed list + client id + account number), so an account always belongs to the same client. ~70% online. Amounts are log-uniform in [1, 50 000] (many small, few large).
+- `ops.random_message()` / `ops.random_amount()` are reused by the 5-second insert job (Stage 4): one source of truth for what a valid operation looks like.
+- Normal insert path, so every generated row goes through the GUID registry trigger + FK.
+
+### Deviations from the plan
+
+1. **Init order changed: `05_seed.sql` now runs before the MV** (plan: MV `06`, seed `07`). Seeding *inserts* status-1 rows, and the MV refresh trigger reacts to `UPDATE`s. With the old order the MV would have been created empty and stayed stale until the first 0→1 update. Now: `04_generator`, `05_seed`, `06_job_functions`, `07_materialized_view`, `08_jobs`, `09_publication`. Plan updated.
+2. **The procedure has no `SET search_path`** (exception to D-20): PostgreSQL rejects `COMMIT` inside a procedure that has a `SET` clause (`invalid transaction termination`). It relies on full schema-qualification instead. D-20 updated with the exception.
+
+### Verification
+
+`verify/02_generator.sql` — **12/12 PASS**:
+
+```
+ 1 | PASS | ops.generate_operations is a stored PROCEDURE
+ 2 | PASS | At least 100 000 rows                               | 100000 rows
+ 3 | PASS | Data spans at least 3 months (and the seed at most 4) | 2026-07-18 19:01 .. 2026-11-18 18:55 (122 days 23:54)
+ 4 | PASS | No day without data inside the period
+ 5 | PASS | Rows spread over monthly partitions, DEFAULT empty   | y2026m07=10767, m08=25199, m09=24380, m10=25155, m11=14499
+ 6 | PASS | No pending (status 0) operation older than 24 h      | status 1: 99598, status 0: 402
+ 7 | PASS | Each account number belongs to exactly one client
+ 8 | PASS | All account numbers are valid IBANs (mod-97 = 1)
+ 9 | PASS | Client pool and operation types look realistic      | 1000 clients, 2000 accounts, online 69895 / offline 30105
+10 | PASS | Amounts are positive, between 1.00 and 50 000.00    | min 1.00, median 222.95, max 49988.33
+11 | PASS | Ids grow with op_date (no id inversions)
+12 | PASS | Registry has one row per operation                  | registry 100000, operations 100000
+```
+
+Regression: `01_table` 10/10, `03_guid_uniqueness` 12/12.
+
+Performance: **100 000 rows in 9.6 s** (10 batches of ~0.9–1.1 s).
+
+Other manual checks:
+- Input validation: `p_rows => 0`, `p_batch => -1`, `p_from >= p_to` → clear errors, nothing inserted.
+- `CALL` inside `BEGIN … ROLLBACK` → `invalid transaction termination` (expected for a committing procedure; documented in its comment).
+- `p_seed` (reproducible dates/amounts/clients) exists but was **not** exercised by a test.
+
+### Problems found during implementation
+
+- **A verification check that could never fail.** Check 5 compared `tableoid::regclass::text` (`'ops.operations_default'`) with `'operations_default'`, so it would have passed even with rows in `DEFAULT`. Fixed: it now compares `regclass` values. A negative test (a row inserted into `DEFAULT` inside a rolled-back transaction) now gives `FAIL` as expected. Lesson applied from here on: every new check gets one negative run.
+- **My first benchmark attempt was broken:** results were lost by a rollback inside a `DO` block, and the twin table was created outside the transaction and left behind. The twin table was dropped and the benchmark redone inside a single `BEGIN … ROLLBACK`; nothing is left over.
+
+### Carried item closed: S2-03 (cost of the GUID uniqueness path)
+
+Measured in a rolled-back transaction: 10k-row inserts into T1 vs. an identical partitioned twin (same columns, PK, unique index, `CHECK`s, indexes) **without** the registry trigger/FK:
+
+| Variant | 3 runs, ms per 10k rows |
+|---------|------------------------|
+| Without registry | 737, 691, 692 |
+| With registry (trigger + FK + registry indexes) | 939, 967, 932 |
+
+≈ **+35% (~25 µs per row)**. Irrelevant for the 5-second job and acceptable for bulk loads, so UUIDv7 is **not** introduced. The decision is now backed by a measurement.

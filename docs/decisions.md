@@ -23,4 +23,4 @@ One line per decision. Details, alternatives and reasoning are in the linked ses
 | D-17 | Git | One commit per stage, no push | [Session 4 · Q4.3](01-grilling-session-4.md) |
 | D-18 | DEFAULT partition | Pre-create partitions ahead on both sides (subscriber: before subscribing); maintenance function moves rows out of `DEFAULT` and attaches the new partition in one transaction; `DEFAULT` must be empty in verification | [Review R-03](03-plan-review.md) |
 | D-19 | Confirm-job audit | `ops.confirm_job_log` — run time, second, parity, rows confirmed — per run (primary only) | [Review R-06](03-plan-review.md) |
-| D-20 | Coding rule | All objects schema-qualified; every function has `SET search_path = ops, pg_catalog` (PG 17 restricted search_path for MV maintenance) | [Review R-04](03-plan-review.md) |
+| D-20 | Coding rule | All objects schema-qualified; every function has `SET search_path = ops, pg_catalog` (PG 17 restricted search_path for MV maintenance). **Exception:** procedures that `COMMIT` (PostgreSQL forbids transaction control with a `SET` clause) rely on schema-qualification only | [Review R-04](03-plan-review.md), Stage 3 |

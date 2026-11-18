@@ -57,5 +57,32 @@ SELECT 'Replica shape: no GUID registry, no MV, only the partition-maintenance j
               coalesce(to_regclass('ops.client_type_totals')::text, 'none'),
               (SELECT string_agg(jobname, ',') FROM cron.job));
 
+-- Local writes are rejected (stage-7 review S7-01); replication itself is covered by the live checks
+DO $$
+DECLARE
+    stmts text[] := ARRAY[
+        $s$INSERT INTO ops.operations (amount, message) VALUES (1, '{"account_number":"UA000000000000000000000000001","client_id":1,"operation_type":"online"}')$s$,
+        $s$UPDATE ops.operations SET amount = amount WHERE id = (SELECT min(id) FROM ops.operations)$s$,
+        $s$DELETE FROM ops.operations WHERE id = (SELECT min(id) FROM ops.operations)$s$,
+        $s$TRUNCATE ops.operations$s$
+    ];
+    s text; rejected int := 0; detail text := '';
+BEGIN
+    -- Direct write into a POPULATED partition (a row-level trigger only fires for rows
+    -- that exist: a DELETE on an empty partition proves nothing).
+    stmts := stmts || (SELECT format('UPDATE %s SET amount = amount WHERE id = %s', tableoid::regclass, id)
+                       FROM ops.operations ORDER BY id LIMIT 1);
+    FOREACH s IN ARRAY stmts LOOP
+        BEGIN
+            EXECUTE s;
+            detail := detail || ' ALLOWED: ' || left(s, 30) || ';';
+        EXCEPTION WHEN read_only_sql_transaction THEN rejected := rejected + 1;
+        END;
+    END LOOP;
+    INSERT INTO vr (check_name, passed, details)
+    VALUES ('Local INSERT / UPDATE / DELETE / TRUNCATE / direct partition write are rejected on the replica',
+            rejected = array_length(stmts, 1), format('%s of %s rejected%s', rejected, array_length(stmts, 1), detail));
+END $$;
+
 SELECT n AS "#", CASE WHEN passed THEN 'PASS' ELSE 'FAIL' END AS result, check_name, details FROM vr ORDER BY n;
 ROLLBACK;

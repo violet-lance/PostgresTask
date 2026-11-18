@@ -40,6 +40,11 @@ services:
       - -c
       - wal_level=logical
       - -c
+      # A logical slot pins WAL while the subscriber is away; cap it so the primary
+      # cannot fill its disk (stage-7 review S7-02). Over the cap the slot is invalidated
+      # and the replica must be re-synced.
+      - max_slot_wal_keep_size=1GB
+      - -c
       - timezone=UTC
       - -c
       - log_timezone=UTC

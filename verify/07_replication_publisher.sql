@@ -47,5 +47,13 @@ SELECT 'Walsender for ops_sub is streaming, replay lag < 1 MB',
                 pg_wal_lsn_diff(pg_current_wal_lsn(), r.replay_lsn), coalesce(r.replay_lag::text, 'n/a')), ''), 'no walsender')
 FROM pg_stat_replication r WHERE r.application_name = 'ops_sub';
 
+INSERT INTO vr (check_name, passed, details)
+SELECT 'WAL retained for slots is capped (max_slot_wal_keep_size = 1GB) and the slot is within it',
+       current_setting('max_slot_wal_keep_size') = '1GB'
+         AND coalesce((SELECT bool_and(wal_status IN ('reserved', 'extended')) FROM pg_replication_slots WHERE slot_name = 'ops_sub'), false),
+       format('max_slot_wal_keep_size=%s; slot wal_status=%s, safe_wal_size=%s', current_setting('max_slot_wal_keep_size'),
+              (SELECT wal_status FROM pg_replication_slots WHERE slot_name = 'ops_sub'),
+              (SELECT pg_size_pretty(safe_wal_size) FROM pg_replication_slots WHERE slot_name = 'ops_sub'));
+
 SELECT n AS "#", CASE WHEN passed THEN 'PASS' ELSE 'FAIL' END AS result, check_name, details FROM vr ORDER BY n;
 ROLLBACK;

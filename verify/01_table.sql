@@ -7,6 +7,11 @@
 \pset footer off
 BEGIN;
 
+-- On the replica T1 is guarded against local writes (replica/03_read_only_guard.sql);
+-- this script's test writes are rolled back, so allow them for this transaction only.
+-- No effect on the primary.
+SELECT set_config('ops.allow_replica_writes', 'on', true) AS ignored \gset
+
 CREATE TEMP TABLE vr (n serial, check_name text, passed boolean, details text) ON COMMIT DROP;
 
 -- 0. DEFAULT partition is empty (checked first, before this script inserts anything) — D-18

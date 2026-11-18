@@ -85,6 +85,7 @@ DECLARE
     v_name  text        := format('operations_y%sm%s', to_char(v_month, 'YYYY'), to_char(v_month, 'MM'));
     v_cols  text;
     v_moved bigint;
+    v_allow text;
 BEGIN
     -- Same lock as ensure_monthly_partitions() (advisory xact locks are re-entrant),
     -- so direct calls of this function are serialised too.
@@ -97,6 +98,12 @@ BEGIN
     IF to_regclass('ops.operations_default') IS NOT NULL
        AND EXISTS (SELECT 1 FROM ops.operations_default WHERE op_date >= v_lo AND op_date < v_hi)
     THEN
+        -- On the replica, T1 is guarded against local writes (replica/03_read_only_guard.sql);
+        -- moving rows out of DEFAULT is an intentional local write, so allow it for this
+        -- block only and restore the previous value afterwards. No-op on the primary.
+        v_allow := current_setting('ops.allow_replica_writes', true);
+        PERFORM set_config('ops.allow_replica_writes', 'on', true);
+
         ALTER TABLE ops.operations DETACH PARTITION ops.operations_default;
 
         EXECUTE format('CREATE TABLE ops.%I (LIKE ops.operations INCLUDING DEFAULTS INCLUDING CONSTRAINTS)', v_name);
@@ -115,6 +122,8 @@ BEGIN
 
         EXECUTE format('ALTER TABLE ops.operations ATTACH PARTITION ops.%I FOR VALUES FROM (%L) TO (%L)', v_name, v_lo, v_hi);
         ALTER TABLE ops.operations ATTACH PARTITION ops.operations_default DEFAULT;
+
+        PERFORM set_config('ops.allow_replica_writes', coalesce(v_allow, ''), true);
 
         RAISE NOTICE 'ops.create_month_partition: created % and moved % row(s) out of DEFAULT', v_name, v_moved;
     ELSE

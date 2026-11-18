@@ -477,3 +477,12 @@ Full suite after this stage: primary `01`–`06` 60/60, replica `01_table` 10/10
 | `DELETE` on the primary | gone | gone |
 
 **Counterfactual, demonstrated:** the naive move I rejected in Stage 1 (`DELETE` from the attached DEFAULT + `INSERT` into a standalone table + `ATTACH`) was run on a test row. Result: **primary 1 row, replica 0 rows**, a silent desync. The `DELETE` was published, the `INSERT` was not. A later `DELETE` of that row on the primary raised no apply error on the replica, because logical replication skips a missing row on delete. That is exactly why this kind of desync is silent. Test data and partitions were cleaned up on both sides.
+
+### Stage 7 review
+
+Reviewed after the stage commit → [reviews/stage-7-review.md](reviews/stage-7-review.md).
+- **S7-01:** local writes on the replica silently diverge. A local INSERT doesn't even conflict, because the PK is `(id, op_date)`. Fixed with read-only guard triggers on the replica (D-22), which logical replication bypasses. Self-healing maintenance uses a transaction-local flag.
+- **S7-02:** unbounded WAL retention by the slot. Fixed with `max_slot_wal_keep_size = 1GB` on the primary (D-23).
+- Sequences, DDL, TRUNCATE and credentials are documented.
+
+Fresh re-init: replication 16/16, primary 60/60, replica `01_table` 10/10 PASS.

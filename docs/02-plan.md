@@ -15,7 +15,7 @@ Derived from the decisions in [decisions.md](decisions.md). Each stage ends with
 ├── sql/
 │   ├── common/                     # DDL shared by both instances
 │   │   ├── 01_schema.sql           # schema ops, extensions
-│   │   └── 02_operations.sql       # partitioned ops.operations + partition maintenance function
+│   │   └── 02_operations.sql       # partitioned ops.operations + partition maintenance function + daily job, initial partitions
 │   ├── primary/                    # publisher-only objects (mounted into /docker-entrypoint-initdb.d)
 │   │   ├── 03_guid_registry.sql
 │   │   ├── 04_generator.sql
@@ -25,8 +25,7 @@ Derived from the decisions in [decisions.md](decisions.md). Each stage ends with
 │   │   ├── 08_jobs.sql
 │   │   └── 09_publication.sql
 │   └── replica/
-│       ├── 03_partitions_and_jobs.sql  # pre-create partitions + maintenance job (R-03)
-│       └── 04_subscription.sql
+│       └── 04_subscription.sql     # partitions + maintenance job already come from common/02 (R-03)
 ├── verify/                         # one SQL check per requirement + run script
 └── docs/
 ```
@@ -114,7 +113,7 @@ Derived from the decisions in [decisions.md](decisions.md). Each stage ends with
 
 ### Stage 7 — Replication (requirement 7)
 - Primary: role `replicator` (`LOGIN REPLICATION`, password from `.env`), `GRANT USAGE ON SCHEMA ops`, `GRANT SELECT ON ops.operations`; `CREATE PUBLICATION ops_pub FOR TABLE ops.operations WITH (publish_via_partition_root = true)`. No `pg_hba` change needed *(R-07)*.
-- Replica: the same common DDL; **pre-create partitions covering the publisher's data range before subscribing** *(R-03)*; partition-maintenance job; `CREATE SUBSCRIPTION ops_sub CONNECTION 'host=pg-primary … user=replicator' PUBLICATION ops_pub` (initial copy included).
+- Replica: the same common DDL, which already **pre-creates partitions covering the publisher's data range before subscribing** *(R-03)* and schedules the partition-maintenance job (moved to `common/02` in Stage 1); `CREATE SUBSCRIPTION ops_sub CONNECTION 'host=pg-primary … user=replicator' PUBLICATION ops_pub` (initial copy included).
 - **Verify:** counts and `sum(amount)` per status match on both sides; a fresh row from the 5-s job and a status flip from the 3-s job appear on the replica within seconds; `DEFAULT` empty on the replica; `pg_stat_subscription`, `pg_replication_slots`.
 
 ### Stage 8 — Verification & README

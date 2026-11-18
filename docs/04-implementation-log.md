@@ -114,3 +114,7 @@ Initial partitions: `operations_y2026m07` … `operations_y2027m01` (4 months ba
 Extra manual checks:
 - After the rolled-back verification, nothing is left behind (no `operations_y2027m05`, 0 rows): DDL is transactional.
 - A partition created through the self-healing path (standalone table + `ATTACH`) ends up with exactly the same 4 indexes and 6 `CHECK` constraints as a regular `PARTITION OF` partition.
+
+### Stage 1 review
+
+Reviewed after the stage commit → [reviews/stage-1-review.md](reviews/stage-1-review.md). 5 minor fixes (advisory lock in `create_month_partition`, UTC-only month arithmetic, explicit column list in the self-healing move, "DEFAULT is empty" check, plan docs drift), 3 accepted trade-offs, 1 item carried to Stage 7 (replication safety of self-healing). Re-verified: 10/10 PASS on both instances.

@@ -9,6 +9,11 @@ BEGIN;
 
 CREATE TEMP TABLE vr (n serial, check_name text, passed boolean, details text) ON COMMIT DROP;
 
+-- 0. DEFAULT partition is empty (checked first, before this script inserts anything) — D-18
+INSERT INTO vr (check_name, passed, details)
+SELECT 'DEFAULT partition is empty', count(*) = 0, format('%s row(s) in ops.operations_default', count(*))
+FROM ops.operations_default;
+
 -- 1. Table is partitioned by RANGE on op_date
 INSERT INTO vr (check_name, passed, details)
 SELECT 'T1 is RANGE-partitioned by op_date',

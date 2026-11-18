@@ -83,8 +83,13 @@ DECLARE
     v_lo    timestamptz := v_month::timestamp AT TIME ZONE 'UTC';
     v_hi    timestamptz := (v_month + interval '1 month')::timestamp AT TIME ZONE 'UTC';
     v_name  text        := format('operations_y%sm%s', to_char(v_month, 'YYYY'), to_char(v_month, 'MM'));
+    v_cols  text;
     v_moved bigint;
 BEGIN
+    -- Same lock as ensure_monthly_partitions() (advisory xact locks are re-entrant),
+    -- so direct calls of this function are serialised too.
+    PERFORM pg_advisory_xact_lock(hashtext('ops.ensure_monthly_partitions'));
+
     IF to_regclass(format('ops.%I', v_name)) IS NOT NULL THEN
         RETURN false;
     END IF;
@@ -95,7 +100,15 @@ BEGIN
         ALTER TABLE ops.operations DETACH PARTITION ops.operations_default;
 
         EXECUTE format('CREATE TABLE ops.%I (LIKE ops.operations INCLUDING DEFAULTS INCLUDING CONSTRAINTS)', v_name);
-        EXECUTE format('INSERT INTO ops.%I SELECT * FROM ops.operations_default WHERE op_date >= $1 AND op_date < $2', v_name)
+
+        -- Explicit column list: robust against differing physical column order
+        -- (e.g. after future ALTER TABLE ... DROP/ADD COLUMN on the parent).
+        SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) INTO v_cols
+        FROM pg_attribute
+        WHERE attrelid = 'ops.operations'::regclass AND attnum > 0 AND NOT attisdropped;
+
+        EXECUTE format('INSERT INTO ops.%I (%s) SELECT %s FROM ops.operations_default WHERE op_date >= $1 AND op_date < $2',
+                       v_name, v_cols, v_cols)
             USING v_lo, v_hi;
         DELETE FROM ops.operations_default WHERE op_date >= v_lo AND op_date < v_hi;
         GET DIAGNOSTICS v_moved = ROW_COUNT;
@@ -124,7 +137,7 @@ $$;
 -- initial range). Idempotent; serialised by an advisory lock.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION ops.ensure_monthly_partitions(
-    p_from         date DEFAULT date_trunc('month', now())::date,
+    p_from         date DEFAULT (now() AT TIME ZONE 'UTC')::date,
     p_months_ahead int  DEFAULT 2
 )
 RETURNS int
@@ -151,11 +164,13 @@ BEGIN
     -- Materialise the month list first: a FOR-over-query loop would keep a cursor open
     -- on operations_default, and create_month_partition() may need to DETACH it
     -- ("cannot ALTER TABLE ... because it is being used by active queries").
+    -- All month arithmetic is done on timestamp-without-time-zone values in UTC, so the
+    -- result doesn't depend on the session TimeZone (partition bounds are UTC too).
     SELECT array_agg(m ORDER BY m) INTO v_months
     FROM (
         SELECT g::date AS m
-        FROM generate_series(date_trunc('month', p_from),
-                             date_trunc('month', now()) + make_interval(months => p_months_ahead),
+        FROM generate_series(date_trunc('month', p_from::timestamp),
+                             date_trunc('month', now() AT TIME ZONE 'UTC') + make_interval(months => p_months_ahead),
                              interval '1 month') AS g
         UNION
         SELECT DISTINCT date_trunc('month', op_date AT TIME ZONE 'UTC')::date

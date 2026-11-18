@@ -7,7 +7,8 @@
 -- Requirement 4: add one operation with status 0. Called every 5 seconds by pg_cron.
 -- Reuses the generator's random_amount()/random_message(), so a job-inserted row
 -- looks exactly like generated data, and goes through the same GUID registry path.
--- Returns the new id (visible in cron.job_run_details.return_message as "1 row").
+-- Returns the new id (useful when called by hand; pg_cron itself only records
+-- "1 row" in cron.job_run_details.return_message, not the returned value).
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION ops.insert_random_operation(p_clients int DEFAULT 1000)
 RETURNS bigint

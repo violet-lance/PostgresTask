@@ -291,3 +291,7 @@ Regressions: `01_table` 10/10, `02_generator` 12/12, `03_guid_uniqueness` 12/12.
 ### Observation
 
 pg_cron's interval schedules are very regular here: all gaps were exactly 5.00 s (to two decimals). This matters for Stage 5, where the *parity of the second* decides which ids get confirmed.
+
+### Stage 4 review
+
+Reviewed after the stage commit → [reviews/stage-4-review.md](reviews/stage-4-review.md). Main output: a measurement of pg_cron timing. Interval runs are aligned to the wall clock (:00, :05, …), never skipped or doubled, and the start stays inside the scheduled second (intra-second offset drifts 0→997 ms and wraps). But `now()` inside the job lags by 1–12 ms and can occasionally fall into the next second. Stage 5 therefore verifies parity per run rather than requiring strict alternation. One misleading comment fixed.
